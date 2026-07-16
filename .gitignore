@@ -1,0 +1,38 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg
+.DS_Store
+.env
+.env.*
+!/.env.example
+
+# user secrets / runtime (never commit)
+credentials.json
+settings.json
+**/credentials.json
+**/.config/promptready/**
+
+# local convert output
+promptready-out/
+
+# generated public tree (recreate with scripts/export_public.sh)
+export/public/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# user runtime (never commit)
+credentials.json
+settings.json
+promptready-out/
+export/
