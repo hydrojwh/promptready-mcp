@@ -16,13 +16,11 @@ agents (Grok, Claude Code, Cursor, and other MCP hosts).
 ## Install
 
 ```bash
-git clone https://github.com/OWNER/promptready-mcp.git
+git clone https://github.com/hydrojwh/promptready-mcp.git
 cd promptready-mcp
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
 ```
-
-Replace `OWNER` with the official GitHub org once published.
 
 ## Login (once per machine)
 
