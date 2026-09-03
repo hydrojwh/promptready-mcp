@@ -26,30 +26,40 @@ mcp = FastMCP("promptready")
 
 DEFAULT_OUT_DIR = "promptready-out"
 
-# Match static/js/app.js ENGINE_DISPLAY_NAMES + buildMarkdownDownloadFilename
+# Match static/js/workspace-utils.js ENGINE_DISPLAY_NAMES + buildMarkdownDownloadFilename.
+# 별칭 집합은 백엔드 app/services/pdf_utils.py:normalize_engine 과 같아야 한다.
 ENGINE_DISPLAY_NAMES = {
-    "paddle": "PaddleOCR-VL",
+    "paddle": "PaddleOCR-VL-1.6",
+    "deepseek_ocr": "DeepSeek-OCR",
     "glm_ocr": "GLM-OCR",
-    "paddle_vl15": "PaddleOCR-VL-1.5",
 }
 
 
-def _normalize_engine(raw: Optional[str]) -> str:
+_ENGINE_ALIASES = {
+    "glm_ocr": "glm_ocr", "glmocr": "glm_ocr",
+    "deepseek_ocr": "deepseek_ocr", "deepseek": "deepseek_ocr",
+    "deepseekocr": "deepseek_ocr", "deepseek_ocr_3b": "deepseek_ocr",
+    # 내부 키는 `paddle` 를 유지한다 — 1.5 시절 이름이지만 usage_logs·환경변수에 퍼져 있다.
+    "paddle": "paddle",
+    "paddle_vl16": "paddle", "paddle_vl_1_6": "paddle", "paddle_vl_1.6": "paddle",
+    "paddleocr_vl16": "paddle", "paddleocr_vl_1_6": "paddle", "paddleocr_vl_1.6": "paddle",
+    "paddle_vl_1_5": "paddle", "paddleocr_vl15": "paddle",
+    "paddleocr_vl_1_5": "paddle", "paddleocr_vl_1.5": "paddle", "vl15": "paddle",
+    # 은퇴한 구형 슬롯 — 후속 버전으로 흡수한다.
+    "paddle": "paddle", "paddleocr_vl": "paddle", "paddleocrvl": "paddle",
+}
+
+
+def resolve_engine_alias(raw: Optional[str]) -> Optional[str]:
+    """별칭을 정식 키로. 아는 이름이 아니면 None — 오타를 조용히 삼키지 않는다."""
     if not raw or not isinstance(raw, str):
-        return "paddle"
-    n = raw.strip().lower().replace("-", "_")
-    if n in {"paddle", "paddleocr_vl", "paddleocrvl"}:
-        return "paddle"
-    if n in {"glm_ocr", "glmocr"}:
-        return "glm_ocr"
-    if n in {
-        "paddle_vl15",
-        "paddleocr_vl_1_5",
-        "paddleocr_vl15",
-        "paddleocr_vl_1.5",
-    }:
-        return "paddle_vl15"
-    return "paddle"
+        return None
+    return _ENGINE_ALIASES.get(raw.strip().lower().replace("-", "_").replace(" ", "_"))
+
+
+def _normalize_engine(raw: Optional[str]) -> str:
+    """표시·파일명용. 모르는 값이면 기본 엔진으로 떨어진다."""
+    return resolve_engine_alias(raw) or "paddle"
 
 
 def build_markdown_download_filename(
@@ -203,11 +213,11 @@ async def set_convert_settings(
 ) -> str:
     """Update saved convert defaults (persists for future convert_pdf calls).
 
-    Only pass fields you want to change. Example: set engine to paddle_vl15 once,
+    Only pass fields you want to change. Example: set engine to paddle once,
     then every convert uses that until changed again.
 
     Args:
-        engine: paddle | paddle_vl15 | glm_ocr
+        engine: paddle (PaddleOCR-VL-1.6) | deepseek_ocr (DeepSeek-OCR) | glm_ocr (GLM-OCR)
         include_tables: keep markdown tables
         include_images: include image/visual extraction (heavier)
         remove_references: strip references section when supported
@@ -220,8 +230,9 @@ async def set_convert_settings(
 
     updates: Dict[str, Any] = {}
     if engine is not None:
-        e = engine.strip().lower().replace("-", "_")
-        if e not in ALLOWED_ENGINES:
+        # 별칭(`deepseek`, 은퇴한 `paddle` 등)은 받아주고, 아예 모르는 이름만 거부한다.
+        e = resolve_engine_alias(engine)
+        if e is None or e not in ALLOWED_ENGINES:
             return _err(
                 f"invalid engine {engine!r}",
                 allowed=sorted(ALLOWED_ENGINES),

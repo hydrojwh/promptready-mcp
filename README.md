@@ -1,5 +1,7 @@
 # PromptReady MCP
 
+<!-- mcp-name: io.github.hydrojwh/promptready-mcp -->
+
 Official [Model Context Protocol](https://modelcontextprotocol.io/) client for
 [PromptReady](https://promptready.space) — convert PDF/CSV to Markdown from AI
 agents (Grok, Claude Code, Cursor, and other MCP hosts).
@@ -16,11 +18,26 @@ agents (Grok, Claude Code, Cursor, and other MCP hosts).
 ## Install
 
 ```bash
+pip install promptready-mcp
+```
+
+Or run it without installing:
+
+```bash
+uvx promptready-mcp
+```
+
+<details>
+<summary>From source</summary>
+
+```bash
 git clone https://github.com/hydrojwh/promptready-mcp.git
 cd promptready-mcp
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
 ```
+
+</details>
 
 ## Login (once per machine)
 
@@ -28,12 +45,39 @@ pip install -e .
 promptready-mcp-login
 ```
 
-Opens Google OAuth and saves credentials to
-`~/.config/promptready/credentials.json` (file mode `0600`).
+If you installed with `uvx`, the login command lives in the same package:
+
+```bash
+uvx --from promptready-mcp promptready-mcp-login
+```
+
+Either opens Google OAuth and saves credentials to
+`~/.config/promptready/credentials.json` (file mode `0600`). That path is in your
+home directory, so it survives `uvx` cache resets. You can also log in from inside
+an MCP host by calling the `login` tool.
 
 Supabase Auth must allow redirect:
 
 `http://127.0.0.1:18765/callback`
+
+<details>
+<summary>Email login fallback</summary>
+
+If browser-based Google login is not an option, the same command accepts email
+and password:
+
+```bash
+promptready-mcp-login --email you@x.com
+```
+
+Leave out `--password` and you will be prompted for it instead — this keeps the
+password out of your shell history.
+
+</details>
+
+Already have an access token? Set `PROMPTREADY_ACCESS_TOKEN` in the environment
+(MCP host or shell). Environment variables take precedence over the saved
+credentials file.
 
 ## MCP host config
 
@@ -41,9 +85,7 @@ Supabase Auth must allow redirect:
 
 ```toml
 [mcp_servers.promptready]
-command = "/ABS/PATH/promptready-mcp/.venv/bin/python"
-args = ["-m", "promptready_mcp.server"]
-cwd = "/ABS/PATH/promptready-mcp"
+command = "promptready-mcp"
 enabled = true
 tool_timeout_sec = 3600
 ```
@@ -54,14 +96,32 @@ tool_timeout_sec = 3600
 {
   "mcpServers": {
     "promptready": {
-      "command": "/ABS/PATH/promptready-mcp/.venv/bin/python",
-      "args": ["-m", "promptready_mcp.server"]
+      "command": "promptready-mcp"
     }
   }
 }
 ```
 
 No access token in config files required after login.
+
+<details>
+<summary>Host cannot find <code>promptready-mcp</code></summary>
+
+GUI hosts start servers with a narrow `PATH`, so a console script installed by
+`pip install --user` is often invisible to them — the host reports a spawn
+failure or "server disconnected" rather than a missing command.
+
+Two reliable fixes:
+
+```json
+{ "mcpServers": { "promptready": {
+  "command": "uvx", "args": ["promptready-mcp"] } } }
+```
+
+or point at the absolute path of the script:
+`/ABS/PATH/.venv/bin/promptready-mcp`.
+
+</details>
 
 ## Tools
 
@@ -76,6 +136,10 @@ No access token in config files required after login.
 
 Downloaded names follow the web app: `{name}_PaddleOCR-VL.md` (engine label).
 
+Credits are deducted by the server when a job is queued, exactly as on the web
+app. `convert_pdf(wait=True)` can run for a long time, so give the host a high
+tool timeout.
+
 ## Security
 
 - Tokens are **never** hardcoded in this repository.
@@ -85,8 +149,9 @@ Downloaded names follow the web app: `{name}_PaddleOCR-VL.md` (engine label).
 
 ## Service terms
 
-Using the cloud API is subject to
-[PromptReady Terms](https://promptready.space) and Privacy Policy.
+Using the cloud API is subject to the
+[Terms of Service](https://promptready.space/legal/terms-of-service.en.md) and
+[Privacy Policy](https://promptready.space/legal/privacy-policy.en.md).
 This MIT-licensed client does not grant free unlimited conversion.
 
 ## Smoke test (no account)

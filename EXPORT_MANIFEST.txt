@@ -1,4 +1,4 @@
-export_utc=2026-07-16T041136Z
+export_utc=2026-09-03T124915Z
 source=PromptReady/mcp
 excluded=docs/history,.venv,*.egg-info,STATUS.md,OPEN_SOURCE_*,PUSH_LOG,PRE_PUSH,internal
 files:
@@ -18,3 +18,4 @@ files:
 ./scripts/smoke_live_credits.sh
 ./scripts/smoke_stdio.sh
 ./SECURITY.md
+./server.json

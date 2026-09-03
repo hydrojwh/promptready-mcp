@@ -1,20 +1,53 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "promptready-mcp"
-version = "0.3.0"
-description = "MCP server (stdio) for PromptReady with browser login + convert tools."
+version = "0.3.1"
+description = "MCP server (stdio) for PromptReady — convert PDF/CSV to Markdown from AI agents."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "PromptReady" }]
-urls = { Homepage = "https://promptready.space", Documentation = "https://promptready.space" }
-dependencies = [
-    "mcp>=1.2.0",
-    "httpx>=0.27",
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "pdf",
+    "csv",
+    "markdown",
+    "ocr",
+    "claude",
+    "cursor",
 ]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+    "Topic :: Text Processing :: Markup :: Markdown",
+    "Topic :: Utilities",
+]
+dependencies = [
+    # Upper bounds are required, not cosmetic. mcp 2.x renamed FastMCP to
+    # MCPServer, so an unbounded ">=1.2.0" installs a release that fails at
+    # import in server.py. Lift the cap only together with that migration.
+    "mcp>=1.2.0,<2",
+    "httpx>=0.27,<1",
+]
+
+[project.urls]
+Homepage = "https://promptready.space"
+Documentation = "https://github.com/hydrojwh/promptready-mcp#readme"
+Source = "https://github.com/hydrojwh/promptready-mcp"
+Issues = "https://github.com/hydrojwh/promptready-mcp/issues"
 
 [project.scripts]
 promptready-mcp = "promptready_mcp.server:main"

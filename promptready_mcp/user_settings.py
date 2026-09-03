@@ -21,7 +21,9 @@ DEFAULT_CONVERT_SETTINGS: Dict[str, Any] = {
     "remove_references": True,
 }
 
-ALLOWED_ENGINES = frozenset({"paddle", "paddle_vl15", "glm_ocr"})
+# 백엔드 app/services/pdf_utils.py:normalize_engine 이 받는 3종과 같아야 한다.
+# 은퇴한 `paddle` 은 아래 _normalize 에서 `paddle` 로 흡수된다.
+ALLOWED_ENGINES = frozenset({"paddle", "deepseek_ocr", "glm_ocr"})
 
 
 def default_settings_path() -> Path:
@@ -40,11 +42,19 @@ def _normalize(raw: Dict[str, Any]) -> Dict[str, Any]:
 
     engine = raw.get("engine", out["engine"])
     if isinstance(engine, str):
-        e = engine.strip().lower().replace("-", "_")
+        e = engine.strip().lower().replace("-", "_").replace(" ", "_")
         if e in {"glmocr"}:
             e = "glm_ocr"
-        if e in {"paddleocr_vl15", "paddle_vl_1_5", "vl15"}:
-            e = "paddle_vl15"
+        if e in {"deepseek", "deepseekocr", "deepseek_ocr_3b"}:
+            e = "deepseek_ocr"
+        # 은퇴한 `paddle` 슬롯과 1.5/1.6 표기 흔들림을 전부 흡수한다.
+        if e in {
+            "paddle", "paddleocr_vl", "paddleocrvl", "vl15",
+            "paddleocr_vl15", "paddle_vl_1_5", "paddleocr_vl_1_5", "paddleocr_vl_1.5",
+            "paddle_vl16", "paddle_vl_1_6", "paddle_vl_1.6",
+            "paddleocr_vl16", "paddleocr_vl_1_6", "paddleocr_vl_1.6",
+        }:
+            e = "paddle"
         if e in ALLOWED_ENGINES:
             out["engine"] = e
 
