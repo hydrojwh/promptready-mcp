@@ -97,6 +97,40 @@ def _ok(**fields: Any) -> str:
     return json.dumps({"ok": True, **fields}, ensure_ascii=False)
 
 
+def _persist_refreshed_tokens(tokens: Dict[str, str]) -> None:
+    """Best-effort write of refreshed tokens back to the credentials file.
+
+    Supabase rotates refresh tokens (the old one is revoked on each use), so
+    keeping the new pair only in os.environ leaves a dead token on disk.
+    MCP hosts restart this server on every reconnect, which turned that into
+    a re-login loop. Only the token fields are swapped: email / user_id /
+    base_url are preserved from the existing file because Settings does not
+    carry them and save_credentials overwrites the whole file.
+
+    Never raises: a read-only filesystem must not fail the tool call, which
+    already holds a working token in memory. Emits one token-free stderr
+    line instead of failing silently. If no credentials file exists (env-only
+    setup), nothing is written — we do not create a file the user never had.
+    """
+    try:
+        from .token_store import load_credentials, save_credentials
+
+        creds = load_credentials()
+        if creds is None:
+            return
+        creds.access_token = tokens["access_token"]
+        if tokens.get("refresh_token"):
+            creds.refresh_token = tokens["refresh_token"]
+        save_credentials(creds)
+    except Exception:
+        print(
+            "promptready-mcp: could not save refreshed credentials to disk; "
+            "a fresh login may be needed after this process exits",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
 async def _with_auth_retry(coro_factory):
     """Run an async API call; on 401 try refresh once if refresh_token is set."""
     settings = load_settings()
@@ -113,13 +147,24 @@ async def _with_auth_retry(coro_factory):
     except PromptReadyAPIError as e:
         if e.status_code not in (401, 403) or not settings.refresh_token:
             raise
-        tokens = await client.refresh_access_token(
-            settings.base_url, settings.refresh_token
-        )
-        # Update process env so subsequent tools see the new token.
+        try:
+            tokens = await client.refresh_access_token(
+                settings.base_url, settings.refresh_token
+            )
+        except PromptReadyAPIError:
+            # `from None`: the wrapped error carries the HTTP body, and the
+            # fix is the same regardless of the underlying status.
+            raise PromptReadyAPIError(
+                "Session expired: token refresh failed. Log in again — "
+                "call the login tool or run: promptready-mcp-login"
+            ) from None
+        # Update process env so subsequent tools see the new token, and the
+        # credentials file so a server restart does not resurrect the now
+        # revoked refresh token (Supabase rotates them).
         os.environ["PROMPTREADY_ACCESS_TOKEN"] = tokens["access_token"]
         if tokens.get("refresh_token"):
             os.environ["PROMPTREADY_REFRESH_TOKEN"] = tokens["refresh_token"]
+        _persist_refreshed_tokens(tokens)
         settings = load_settings()
         return await _call(settings.access_token), settings
 
@@ -133,7 +178,8 @@ async def login(timeout_sec: int = 300) -> str:
     (mode 600), and applies them to this process.
 
     Users should run this once (or use CLI: promptready-mcp-login) instead of
-    pasting tokens manually. Requires Supabase redirect allowlist for that URL.
+    pasting tokens manually. After sign-in the browser returns to the local
+    callback URL; no Supabase configuration is required.
     """
     try:
         # Browser + local HTTP server is blocking; run in a worker thread.
@@ -156,8 +202,8 @@ async def login(timeout_sec: int = 300) -> str:
         return _err(
             str(e),
             hint=(
-                "If OAuth redirect failed, add http://127.0.0.1:18765/callback to "
-                "Supabase Auth redirect URLs, or run: promptready-mcp-login --email you@x.com"
+                "If the browser flow keeps failing, log in from a terminal "
+                "instead: promptready-mcp-login --email you@x.com"
             ),
         )
 

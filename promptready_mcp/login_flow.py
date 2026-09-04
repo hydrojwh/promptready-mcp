@@ -9,6 +9,7 @@ Tokens are stored via token_store (chmod 600) and applied to the environment.
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import sys
 import threading
@@ -22,7 +23,9 @@ from urllib.request import Request, urlopen
 from .config import DEFAULT_BASE_URL, load_settings
 from .token_store import Credentials, apply_credentials_to_environ, save_credentials
 
-# Fixed port so Supabase / backend redirect allowlists can include it.
+# Fixed port so the local callback address is stable and documented.
+# Loopback redirects need no provider-side registration (RFC 8252 §7.3),
+# so --port NNNNN works too when this one is busy.
 DEFAULT_CALLBACK_PORT = 18765
 CALLBACK_PATH = "/callback"
 
@@ -157,7 +160,7 @@ _CAPTURE_HTML = """<!DOCTYPE html>
       } else if (query.get('error')) {
         throw new Error(query.get('error_description') || query.get('error'));
       } else {
-        throw new Error('No access_token or code in callback URL. Check Supabase redirect URL allowlist for http://127.0.0.1:PORT/callback');
+        throw new Error('No access_token or code in callback URL. Please retry the login.');
       }
       const r = await fetch('/capture', {
         method: 'POST',
@@ -264,7 +267,17 @@ def login_with_browser(
                 self._send(400, body, "application/json")
                 done.set()
 
-    server = HTTPServer(("127.0.0.1", port), Handler)
+    try:
+        server = HTTPServer(("127.0.0.1", port), Handler)
+    except OSError as e:
+        # CPython maps WSAEADDRINUSE on Windows to errno.EADDRINUSE too.
+        if e.errno == errno.EADDRINUSE:
+            raise RuntimeError(
+                f"Login callback port {port} is already in use — another "
+                "login may still be running. Close it and try again, or "
+                f"pick a different port: promptready-mcp-login --port {port + 1}"
+            ) from None
+        raise
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
@@ -284,12 +297,13 @@ def login_with_browser(
 
     if not finished:
         raise TimeoutError(
-            f"Login timed out after {timeout_sec:.0f}s. "
-            "Ensure Supabase redirect allowlist includes "
-            f"{redirect_to} (and backend allows 127.0.0.1). "
-            "If you complete the login in the browser afterwards, access and "
-            "refresh tokens can be exposed in the browser address bar — "
-            "invalidate that session (see SECURITY.md)."
+            f"Login timed out after {timeout_sec:.0f}s. Check the browser "
+            "for the Google sign-in page (its URL was printed above). If "
+            "browser login keeps failing, use email instead: "
+            "promptready-mcp-login --email you@x.com. Note: if you complete "
+            "the login in the browser afterwards, access and refresh tokens "
+            "can be exposed in the browser address bar — invalidate that "
+            "session (see SECURITY.md)."
         )
     if result.get("error"):
         raise RuntimeError(result["error"])

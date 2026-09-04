@@ -56,9 +56,8 @@ Either opens Google OAuth and saves credentials to
 home directory, so it survives `uvx` cache resets. You can also log in from inside
 an MCP host by calling the `login` tool.
 
-Supabase Auth must allow redirect:
-
-`http://127.0.0.1:18765/callback`
+After you sign in, the browser returns to `http://127.0.0.1:18765/callback` — a
+local page started by the login command. No Supabase configuration is needed.
 
 <details>
 <summary>Email login fallback</summary>
