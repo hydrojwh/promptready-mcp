@@ -26,6 +26,14 @@ mcp = FastMCP("promptready")
 
 DEFAULT_OUT_DIR = "promptready-out"
 
+# The backend can flip stage to "completed" a few seconds before the result
+# markdown_url is populated (measured <=5s after completion, 2026-09-04,
+# 4/4 files). convert_pdf(wait=true) keeps re-checking status for up to
+# this long before reporting a pending download. 30s = 6x the measured
+# worst case, bounded so a wait call cannot hang. Status reads are GETs
+# and never deduct credits (credits go on POST /convert only).
+RESULT_URL_WAIT_SEC = 30.0
+
 # Match static/js/workspace-utils.js ENGINE_DISPLAY_NAMES + buildMarkdownDownloadFilename.
 # 별칭 집합은 백엔드 app/services/pdf_utils.py:normalize_engine 과 같아야 한다.
 ENGINE_DISPLAY_NAMES = {
@@ -330,6 +338,9 @@ async def convert_pdf(
         output_dir: Directory for downloaded .md when wait=true.
 
     Returns JSON with job info; if wait=true and completed, includes local md path.
+    The download can lag completion by a few seconds; if the file still cannot
+    be saved, the response says download="pending" — the conversion succeeded
+    and credits were already spent, so call wait_and_download, not convert again.
     """
     from .user_settings import load_convert_settings, settings_to_api_params
 
@@ -381,7 +392,9 @@ async def convert_pdf(
         return _ok(**result)
 
     # wait path
-    waited = await _poll_until_done(timeout_sec=timeout_sec)
+    waited = await _poll_until_done(
+        timeout_sec=timeout_sec, url_wait_sec=RESULT_URL_WAIT_SEC
+    )
     result["status"] = waited
     if waited.get("stage") == "completed":
         saved = await _save_result_markdown(waited, path, output_dir)
@@ -389,7 +402,17 @@ async def convert_pdf(
             result["markdown_path"] = saved.get("markdown_path")
             result["download"] = "ok"
         else:
+            # The conversion itself succeeded and credits were spent at
+            # queue time; only the file delivery failed. Say so explicitly
+            # so the caller fetches the result instead of converting again
+            # (a re-convert would spend fresh credits for the same file).
+            result["download"] = "pending"
             result["download_error"] = saved.get("error")
+            result["next"] = (
+                "Conversion succeeded and credits were already spent — do "
+                "NOT convert this file again. The server still has the "
+                "result; call wait_and_download to fetch the markdown."
+            )
     return _ok(**result)
 
 
@@ -454,12 +477,35 @@ async def wait_and_download(
     )
 
 
+def _status_has_markdown(status: Dict[str, Any]) -> bool:
+    """True if the status payload already carries the result markdown."""
+    result = status.get("result") or {}
+    return bool(
+        status.get("markdown")
+        or status.get("markdown_url")
+        or result.get("markdown")
+        or result.get("markdown_url")
+    )
+
+
 async def _poll_until_done(
-    *, timeout_sec: int = 3600, poll_interval_sec: float = 3.0
+    *,
+    timeout_sec: int = 3600,
+    poll_interval_sec: float = 3.0,
+    url_wait_sec: float = 0.0,
 ) -> Dict[str, Any]:
+    """Poll GET /convert/status until a terminal stage is reached.
+
+    With url_wait_sec > 0, a "completed" stage whose payload has no
+    markdown_url/markdown yet is not treated as final: the backend can
+    flip the stage a few seconds before the result URL appears, so keep
+    re-checking for up to url_wait_sec (status reads are free — no
+    credits). Callers that pass 0 keep the pre-0.3.6 behavior.
+    """
     deadline = asyncio.get_event_loop().time() + max(1, timeout_sec)
     last: Dict[str, Any] = {}
     terminal = {"completed", "failed", "cancelled"}
+    url_wait_started: Optional[float] = None
 
     while asyncio.get_event_loop().time() < deadline:
         data, _ = await _with_auth_retry(
@@ -468,6 +514,17 @@ async def _poll_until_done(
         last = data
         stage = data.get("stage") or data.get("status")
         if stage in terminal:
+            if (
+                stage == "completed"
+                and url_wait_sec > 0
+                and not _status_has_markdown(data)
+            ):
+                now = asyncio.get_event_loop().time()
+                if url_wait_started is None:
+                    url_wait_started = now
+                if now - url_wait_started < url_wait_sec and now < deadline:
+                    await asyncio.sleep(max(0.5, poll_interval_sec))
+                    continue
             return data
         if stage == "not_found" and last.get("status") == "not_found":
             # No job yet or lost — keep brief wait then return.
