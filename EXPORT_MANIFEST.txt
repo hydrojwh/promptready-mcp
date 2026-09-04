@@ -1,4 +1,4 @@
-export_utc=2026-09-04T080250Z
+export_utc=2026-09-04T101941Z
 source=PromptReady/mcp
 excluded=docs/history,.venv,*.egg-info,STATUS.md,OPEN_SOURCE_*,PUSH_LOG,PRE_PUSH,internal
 files:
@@ -11,6 +11,7 @@ files:
 ./promptready_mcp/client.py
 ./promptready_mcp/config.py
 ./promptready_mcp/login_flow.py
+./promptready_mcp/prompts.py
 ./promptready_mcp/server.py
 ./promptready_mcp/token_store.py
 ./promptready_mcp/user_settings.py

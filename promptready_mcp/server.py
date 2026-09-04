@@ -2,6 +2,7 @@
 
 P0: get_credits
 P1: convert_pdf, get_status, wait_and_download
+P2 (0.3.7): slash prompts for humans — see prompts.py
 """
 from __future__ import annotations
 
@@ -19,10 +20,14 @@ from mcp.server.fastmcp import FastMCP
 from . import client
 from .client import PromptReadyAPIError
 from .config import load_settings
+from .prompts import register_prompts
 
 logger = logging.getLogger("promptready_mcp")
 
 mcp = FastMCP("promptready")
+
+# Human entry points: /promptready:<name> in MCP hosts (0.3.7).
+register_prompts(mcp)
 
 DEFAULT_OUT_DIR = "promptready-out"
 
@@ -442,6 +447,11 @@ async def wait_and_download(
 ) -> str:
     """Poll get_status until completed/failed/cancelled, then download markdown if available.
 
+    Like convert_pdf(wait=true), a "completed" stage whose payload has no
+    markdown_url yet is re-checked for up to RESULT_URL_WAIT_SEC (0.3.7):
+    the backend can flip the stage a few seconds before the result URL
+    appears. Status reads are free — only the upload spent credits.
+
     Args:
         timeout_sec: Max seconds to wait (OCR can take many minutes).
         poll_interval_sec: Sleep between polls (default 3).
@@ -450,7 +460,9 @@ async def wait_and_download(
     """
     try:
         status = await _poll_until_done(
-            timeout_sec=timeout_sec, poll_interval_sec=poll_interval_sec
+            timeout_sec=timeout_sec,
+            poll_interval_sec=poll_interval_sec,
+            url_wait_sec=RESULT_URL_WAIT_SEC,
         )
     except PromptReadyAPIError as e:
         return _err(e.message, status_code=e.status_code, body=e.body)

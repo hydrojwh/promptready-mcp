@@ -12,6 +12,7 @@ agents (Grok, Claude Code, Cursor, and other MCP hosts).
 
 - Browser Google login (tokens stay on your machine)
 - `get_credits`, `convert_pdf`, `get_status`, `wait_and_download`
+- Slash commands for humans: `/promptready:convert` and five more (below)
 - Saved convert defaults (engine, tables, images) — not on every call
 - Factory default: **PaddleOCR-VL**, tables on, images off
 
@@ -101,10 +102,11 @@ Hosts do not pick up MCP config changes mid-session. After changing the
 config, restart the host or reconnect the server — in Claude Code, open the
 `/mcp` panel and reconnect.
 
-Seeing tools in the `/mcp` panel does **not** mean the server is connected:
-the panel can list the tool catalog while the session has no live server,
-and picking a tool from that list will not run it. If tools are listed but
-calls fail, reconnect first.
+The `/mcp` panel shows server status and lists the connected servers'
+tools, but it does **not** run them: picking a tool in that list will
+not invoke it. Tools are invoked through normal conversation — ask the
+agent to convert a file and it calls `convert_pdf` for you. If a call
+fails, reconnect from the panel first.
 
 ### Claude Code
 
@@ -188,6 +190,43 @@ Downloaded names follow the web app: `{name}_PaddleOCR-VL.md` (engine label).
 Credits are deducted by the server when a job is queued, exactly as on the web
 app. `convert_pdf(wait=True)` can run for a long time, so give the host a high
 tool timeout.
+
+## Slash commands
+
+MCP *prompts* are the human entry point: instead of describing what you
+want, you pick a command. Hosts that surface prompts as slash commands
+(Claude Code does) show them as `/promptready:<name>`:
+
+| Slash command | Purpose |
+|---------------|---------|
+| `/promptready:login` | Log in (opens the browser Google sign-in) |
+| `/promptready:logout` | Log out on this machine |
+| `/promptready:credits` | Show your credit balance |
+| `/promptready:convert` | Convert a PDF/CSV to Markdown |
+| `/promptready:site` | Show the PromptReady web app URL |
+| `/promptready:settings` | Show — and optionally change — convert defaults |
+
+Each command expands to a short instruction; the agent then calls the
+matching tool (`login`, `get_credits`, `convert_pdf`, …) for you.
+
+`/promptready:convert` optionally takes two positional arguments, input
+path then output directory. Pick the command from the slash menu (hosts
+may list it as `promptready:convert (MCP)`) and append the arguments:
+
+```text
+/promptready:convert (MCP) report.pdf markdown-out
+```
+
+Arguments are split on whitespace and cannot be quoted, so paths with
+spaces do not fit on the command line — run the command bare and give
+the paths in chat instead. With no arguments the command asks you for
+them. The conversion itself always goes through the `convert_pdf` tool:
+never re-run it for the same file while a download is pending — that
+queues a fresh conversion and spends fresh credits; the expanded command
+tells the agent to call `wait_and_download` instead.
+
+Hosts that do not map prompts to slash commands simply ignore this
+section; the tools keep working as before.
 
 ## Security
 
