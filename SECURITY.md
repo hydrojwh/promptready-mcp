@@ -20,6 +20,27 @@ After `promptready-mcp-login`, tokens are stored only on **your** computer:
 
 **Never commit** these files, paste tokens into issues, or share them in chat logs.
 
+## Tokens in the address bar after an interrupted login
+
+The `login` tool and `promptready-mcp-login` wait for the OAuth redirect on a
+local callback (`http://127.0.0.1:18765/callback`) and clear the address bar
+from the callback page itself. If that wait **times out or the process is
+stopped first** and you then complete the login in the browser, Supabase
+redirects to a callback address that no longer exists and the **access and
+refresh tokens stay in the browser address bar and history** — the page that
+scrubs them never runs.
+
+If this happens:
+
+- Treat the session as compromised: **invalidate it** (sign out everywhere /
+  revoke the session for this account), then log in again.
+- Clear the affected browser history entry if it contains a `#access_token=`
+  fragment.
+
+The timeout is a deadline for the *whole* login, so keep it generous (default
+300 s) or complete the login before it expires. Do not lower it to work around
+a slow browser.
+
 ## Reporting a vulnerability
 
 Please **do not** open a public GitHub issue for security vulnerabilities.

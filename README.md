@@ -81,6 +81,56 @@ credentials file.
 
 ## MCP host config
 
+### Fastest: let your AI agent install it
+
+If you are already in an MCP-capable agent, skip the JSON editing and just
+ask:
+
+> Install the PromptReady MCP server for me. The PyPI package is
+> `promptready-mcp` (stdio command `promptready-mcp`). Add it to your MCP
+> config, then I will run the `login` tool.
+
+In Claude Code the agent can use the built-in CLI:
+
+```bash
+claude mcp add promptready -- promptready-mcp
+```
+
+### Reconnect after changing config
+
+Hosts do not pick up MCP config changes mid-session. After changing the
+config, restart the host or reconnect the server — in Claude Code, open the
+`/mcp` panel and reconnect.
+
+Seeing tools in the `/mcp` panel does **not** mean the server is connected:
+the panel can list the tool catalog while the session has no live server,
+and picking a tool from that list will not run it. If tools are listed but
+calls fail, reconnect first.
+
+### Claude Code
+
+```bash
+claude mcp add promptready -- promptready-mcp
+```
+
+The default scope is `local` (this project only). Use `--scope user` to
+register it for all your projects, or `--scope project` to share the
+registration through a committed `.mcp.json`.
+
+### Cursor
+
+Add to `~/.cursor/mcp.json` (or `.cursor/mcp.json` for a single project):
+
+```json
+{
+  "mcpServers": {
+    "promptready": {
+      "command": "promptready-mcp"
+    }
+  }
+}
+```
+
 ### Grok
 
 ```toml

@@ -8,7 +8,9 @@ Tokens are stored via token_store (chmod 600) and applied to the environment.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import sys
 import threading
 import time
 import urllib.parse
@@ -17,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Dict, Optional, Tuple
 from urllib.request import Request, urlopen
 
-from .config import DEFAULT_BASE_URL
+from .config import DEFAULT_BASE_URL, load_settings
 from .token_store import Credentials, apply_credentials_to_environ, save_credentials
 
 # Fixed port so Supabase / backend redirect allowlists can include it.
@@ -97,6 +99,36 @@ def _exchange_code(base_url: str, code: str) -> Credentials:
     )
 
 
+def _enrich_email_from_credits(creds: Credentials, *, timeout: float = 8.0) -> bool:
+    """Best-effort: fill creds.email via GET /api/v1/users/credits.
+
+    Reuses the async fetch_credits from .client (httpx is already a hard
+    dependency); the callback handler thread has no running event loop, so
+    asyncio.run is safe here. Never raises and never logs: a failed or slow
+    lookup must not fail the login, and swallowed errors keep tokens out of
+    logs and exception text. Returns True when an email was found.
+    """
+    if creds.email:
+        return True
+    try:
+        from .client import fetch_credits
+
+        data = asyncio.run(
+            fetch_credits(
+                creds.base_url or DEFAULT_BASE_URL,
+                creds.access_token,
+                timeout=timeout,
+            )
+        )
+        email = str(data.get("email") or "").strip()
+        if email:
+            creds.email = email
+            return True
+    except Exception:
+        pass
+    return False
+
+
 _CAPTURE_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -136,7 +168,7 @@ _CAPTURE_HTML = """<!DOCTYPE html>
       if (!data.ok) throw new Error(data.error || 'capture failed');
       msg.className = 'ok';
       msg.innerHTML = 'Login successful' + (data.email ? ' as <code>' + data.email + '</code>' : '') +
-        '. You can close this tab and return to the terminal / Grok.';
+        '. You can close this tab and return to your terminal or MCP client.';
       // Clear tokens from the address bar
       history.replaceState(null, '', '/done');
     } catch (e) {
@@ -211,8 +243,12 @@ def login_with_browser(
                     creds = _exchange_code(base_url, payload["code"])
                 else:
                     raise RuntimeError("missing access_token or code")
-                # Optional: enrich email via credits endpoint later
+                # Best-effort email enrichment (see _enrich_email_from_credits):
+                # creds are already saved, and a lookup failure must not fail
+                # the login. Re-save only when an email was found.
                 path = save_credentials(creds)
+                if _enrich_email_from_credits(creds):
+                    save_credentials(creds)
                 apply_credentials_to_environ(creds)
                 result["creds"] = creds
                 result["path"] = str(path)
@@ -232,20 +268,28 @@ def login_with_browser(
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
-    print(f"Listening for OAuth callback on {redirect_to}", flush=True)
-    print(f"Open this URL if the browser does not open:\n{auth_url}\n", flush=True)
+    # Diagnostics must go to stderr: under the MCP stdio transport, stdout is
+    # reserved for JSON-RPC frames and any plain-text line corrupts the
+    # protocol stream. stderr still reaches the terminal in CLI use, so the
+    # login URL stays visible for `promptready-mcp-login`.
+    print(f"Listening for OAuth callback on {redirect_to}", file=sys.stderr, flush=True)
+    print(f"Open this URL if the browser does not open:\n{auth_url}\n", file=sys.stderr, flush=True)
     if open_browser:
         webbrowser.open(auth_url)
 
     finished = done.wait(timeout=timeout_sec)
     server.shutdown()
     thread.join(timeout=2)
+    server.server_close()
 
     if not finished:
         raise TimeoutError(
             f"Login timed out after {timeout_sec:.0f}s. "
             "Ensure Supabase redirect allowlist includes "
-            f"{redirect_to} (and backend allows 127.0.0.1)."
+            f"{redirect_to} (and backend allows 127.0.0.1). "
+            "If you complete the login in the browser afterwards, access and "
+            "refresh tokens can be exposed in the browser address bar — "
+            "invalidate that session (see SECURITY.md)."
         )
     if result.get("error"):
         raise RuntimeError(result["error"])
@@ -261,21 +305,27 @@ def run_login_cli(argv: Optional[list] = None) -> int:
     import getpass
 
     parser = argparse.ArgumentParser(description="Log in to PromptReady for MCP")
-    parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="API base URL (default: PROMPTREADY_BASE_URL env, then saved "
+        "credentials, then built-in — same priority as the MCP server)",
+    )
     parser.add_argument("--email", help="Email/password login instead of browser")
     parser.add_argument("--password", help="Password (or prompt)")
     parser.add_argument("--port", type=int, default=DEFAULT_CALLBACK_PORT)
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--timeout", type=float, default=300.0)
     args = parser.parse_args(argv)
+    base_url = args.base_url or load_settings().base_url
 
     try:
         if args.email:
             password = args.password or getpass.getpass("Password: ")
-            creds = login_with_email(args.email, password, base_url=args.base_url)
+            creds = login_with_email(args.email, password, base_url=base_url)
         else:
             creds = login_with_browser(
-                base_url=args.base_url,
+                base_url=base_url,
                 port=args.port,
                 open_browser=not args.no_browser,
                 timeout_sec=args.timeout,
