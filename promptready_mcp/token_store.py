@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -44,6 +46,15 @@ def load_credentials(path: Optional[Path] = None) -> Optional[Credentials]:
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        # One token-free stderr line so "why did my login disappear" is
+        # answerable; the path is safe to show, file contents are not.
+        print(
+            f"promptready-mcp: credentials file at {p} is unreadable or "
+            "corrupt; acting as not logged in. Remove the file and log in "
+            "again (login tool or promptready-mcp-login) if this recurs.",
+            file=sys.stderr,
+            flush=True,
+        )
         return None
     access = data.get("access_token")
     if not access:
@@ -60,11 +71,27 @@ def load_credentials(path: Optional[Path] = None) -> Optional[Credentials]:
 def save_credentials(creds: Credentials, path: Optional[Path] = None) -> Path:
     p = path or default_credentials_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    # Write privately
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(creds.to_dict(), indent=2) + "\n", encoding="utf-8")
-    os.chmod(tmp, 0o600)
-    tmp.replace(p)
+    payload = json.dumps(creds.to_dict(), indent=2) + "\n"
+    # Per-call temp file in the target's own directory (same filesystem, so
+    # the final replace stays atomic). mkstemp's O_CREAT|O_EXCL means two
+    # processes never share a tmp file — the fixed name let one process
+    # replace the file while another was mid-write into the same tmp,
+    # crashing that writer or landing torn content in credentials.json.
+    # mkstemp also creates the file 0600 from the first instant, whatever
+    # the umask, so the token is never briefly group/world-readable.
+    fd, tmp_name = tempfile.mkstemp(dir=p.parent, prefix=p.name + ".", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+        os.replace(tmp, p)
+    except BaseException:
+        # Never leave a token-bearing tmp behind on a failed save.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
     try:
         os.chmod(p, 0o600)
     except OSError:
@@ -74,10 +101,25 @@ def save_credentials(creds: Credentials, path: Optional[Path] = None) -> Path:
 
 def clear_credentials(path: Optional[Path] = None) -> bool:
     p = path or default_credentials_path()
+    removed = False
     if p.is_file():
         p.unlink()
-        return True
-    return False
+        removed = True
+    # A crash between mkstemp and replace leaves a token-bearing temp file;
+    # logout must sweep those too. The names are random (mkstemp) but the
+    # frame is deterministic: "<target-name>.*.tmp" in the same directory.
+    # The pre-0.3.5 code used the fixed name "<stem>.tmp" — sweep legacy
+    # leftovers with the same shape as well.
+    stale = list(p.parent.glob(p.name + ".*.tmp"))
+    legacy = p.with_suffix(".tmp")
+    if legacy.is_file():
+        stale.append(legacy)
+    for t in stale:
+        try:
+            t.unlink()
+        except OSError:
+            pass
+    return removed
 
 
 def apply_credentials_to_environ(creds: Credentials) -> None:

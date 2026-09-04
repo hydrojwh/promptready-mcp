@@ -152,12 +152,20 @@ async def _with_auth_retry(coro_factory):
                 settings.base_url, settings.refresh_token
             )
         except PromptReadyAPIError:
-            # `from None`: the wrapped error carries the HTTP body, and the
-            # fix is the same regardless of the underlying status.
-            raise PromptReadyAPIError(
+            # `from None` cuts __cause__ but leaves the original exception in
+            # __context__; a dumper walking the chain could still reach the
+            # HTTP body (tokens included). Raise, catch, unlink the context,
+            # bare-re-raise — a bare raise does not re-chain (verified
+            # empirically; pre-clearing before `raise err` does not stick).
+            err = PromptReadyAPIError(
                 "Session expired: token refresh failed. Log in again — "
                 "call the login tool or run: promptready-mcp-login"
-            ) from None
+            )
+            try:
+                raise err from None
+            except PromptReadyAPIError:
+                err.__context__ = None
+                raise
         # Update process env so subsequent tools see the new token, and the
         # credentials file so a server restart does not resurrect the now
         # revoked refresh token (Supabase rotates them).
