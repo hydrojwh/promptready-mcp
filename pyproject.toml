@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "promptready-mcp"
-version = "0.3.7"
+version = "0.3.8"
 description = "MCP server (stdio) for PromptReady — convert PDF/CSV to Markdown from AI agents."
 readme = "README.md"
 requires-python = ">=3.10"

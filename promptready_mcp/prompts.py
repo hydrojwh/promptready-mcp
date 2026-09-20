@@ -9,9 +9,14 @@ Hosts pass slash-command arguments positionally (whitespace-split, no
 quoting), so every prompt argument must be optional — a prompt invoked
 with no arguments must still render a useful instruction that tells the
 agent to ask the user for the missing values in chat.
+
+Design intent: arguments are interpolated into the instruction text
+itself, so a value that can start its own line can smuggle its own
+instruction — every arg-taking prompt validates with _validate_arg.
 """
 from __future__ import annotations
 
+import unicodedata
 from typing import Any
 
 from .config import load_settings
@@ -19,6 +24,26 @@ from .config import load_settings
 # The six names are fixed by product decision (0.3.7): do not rename —
 # users type these as /promptready:<name>.
 PROMPT_NAMES = ("login", "logout", "credits", "convert", "site", "settings")
+
+# Line/paragraph separators are Zl/Zp, not Cc — reject them explicitly.
+_LINE_SEPARATORS = ("\u2028", "\u2029")
+
+
+def _validate_arg(name: str, value: str) -> None:
+    """Reject line breaks and control characters in a prompt argument.
+
+    Typed slash arguments cannot contain them (hosts split on
+    whitespace), but a programmatic caller — API, SDK — can send them,
+    and inside the rendered instruction a newline becomes an independent
+    line the agent may read as its own directive (0.3.8).
+    """
+    for ch in value:
+        if ch in _LINE_SEPARATORS or unicodedata.category(ch) == "Cc":
+            raise ValueError(
+                f"prompt argument {name!r} rejected: line breaks and "
+                "control characters are not allowed — give the value in "
+                "chat instead"
+            )
 
 
 def login() -> str:
@@ -64,6 +89,8 @@ def convert(input_path: str = "", output_path: str = "") -> str:
     Both arguments are optional positional paths (no spaces — give such
     paths in chat instead). Omitted values are asked for in chat.
     """
+    _validate_arg("input_path", input_path)
+    _validate_arg("output_path", output_path)
     if input_path:
         path_line = f"- path: `{input_path}`"
     else:

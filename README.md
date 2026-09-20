@@ -219,7 +219,10 @@ may list it as `promptready:convert (MCP)`) and append the arguments:
 
 Arguments are split on whitespace and cannot be quoted, so paths with
 spaces do not fit on the command line — run the command bare and give
-the paths in chat instead. With no arguments the command asks you for
+the paths in chat instead. Line breaks and control characters in
+arguments are rejected outright (0.3.8): an argument is interpolated
+into the instruction the command expands to, and it must never be able
+to start a line of its own. With no arguments the command asks you for
 them. The conversion itself always goes through the `convert_pdf` tool:
 never re-run it for the same file while a download is pending — that
 queues a fresh conversion and spends fresh credits; the expanded command
