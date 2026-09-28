@@ -1,12 +1,14 @@
-export_utc=2026-09-04T101941Z
+export_utc=2026-09-28T190128Z
 source=PromptReady/mcp
 excluded=docs/history,.venv,*.egg-info,STATUS.md,OPEN_SOURCE_*,PUSH_LOG,PRE_PUSH,internal
 files:
 ./.gitignore
-./docs/README.md
 ./EXPORT_MANIFEST.txt
 ./LICENSE
 ./MANIFEST.in
+./README.md
+./SECURITY.md
+./docs/README.md
 ./promptready_mcp/__init__.py
 ./promptready_mcp/client.py
 ./promptready_mcp/config.py
@@ -16,8 +18,6 @@ files:
 ./promptready_mcp/token_store.py
 ./promptready_mcp/user_settings.py
 ./pyproject.toml
-./README.md
 ./scripts/smoke_live_credits.sh
 ./scripts/smoke_stdio.sh
-./SECURITY.md
 ./server.json

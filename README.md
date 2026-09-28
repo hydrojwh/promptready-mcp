@@ -8,6 +8,11 @@ agents (Grok, Claude Code, Cursor, and other MCP hosts).
 
 **Same PromptReady account and credits as the web app.**
 
+> **Data flow**: your local PDF/CSV files are uploaded to the PromptReady cloud
+> (`promptready.space`) for OCR processing. Converted Markdown is downloaded back
+> to your machine. Files are auto-deleted from the server 3 hours after your
+> batch finishes. No long-term storage.
+
 ## Features
 
 - Browser Google login (tokens stay on your machine)
@@ -18,6 +23,14 @@ agents (Grok, Claude Code, Cursor, and other MCP hosts).
 
 ## Install
 
+### As a Claude Code plugin (recommended)
+
+Once listed in the [Claude Code plugin directory](https://claude.ai/directory):
+```
+/plugin install promptready
+```
+
+### As a standalone MCP server
 ```bash
 pip install promptready-mcp
 ```
