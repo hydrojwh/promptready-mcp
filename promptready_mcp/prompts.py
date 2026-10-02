@@ -111,11 +111,19 @@ Call the `convert_pdf` tool with `wait=true` (OCR can take minutes) and:
 
 When it finishes, report the local markdown path to the user.
 
+If the response contains a `log_id`, keep it and report it to the user:
+the result stays fetchable for 3 hours with
+`wait_and_download(log_id=...)` even if the server restarts or another
+file is converted in the meantime. `list_conversions` lists past
+conversions with their log_ids.
+
 If the response reports `download="pending"`: the conversion itself
 already succeeded and the credits were already spent — call
-`wait_and_download` with the same output_dir to fetch the file. NEVER
-call `convert_pdf` again for the same file: that queues a fresh
-conversion and spends fresh credits.
+`wait_and_download` (with the `log_id` when you have one) to fetch the
+file. NEVER call `convert_pdf` again for the same file: that queues a
+fresh conversion and spends fresh credits. The one exception is an
+expired result (HTTP 410 after 3 hours): the stored file is gone, so
+converting again — and spending fresh credits — is the only way.
 """
 
 

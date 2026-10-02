@@ -164,3 +164,69 @@ async def download_url_to_path(
             )
         dest.write_bytes(resp.content)
     return dest
+
+
+async def list_usage(
+    base_url: str,
+    access_token: str,
+    *,
+    limit: int = 20,
+    offset: int = 0,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> Dict[str, Any]:
+    """GET /users/usage → {total_count, logs: [usage row, ...]}.
+
+    DB-backed (survives server restarts), newest first. Each row carries
+    id / file_name / page_count / credits_deducted / status / created_at /
+    markdown_object_key / expires_at / engine_used — the durable source
+    for looking up a conversion by its log_id (usage row id).
+    """
+    async with httpx.AsyncClient(timeout=timeout) as http:
+        resp = await http.get(
+            _url(base_url, "/users/usage"),
+            headers=_auth_headers(access_token),
+            params={"limit": limit, "offset": offset},
+        )
+        if resp.status_code >= 400:
+            raise PromptReadyAPIError(
+                f"usage list failed HTTP {resp.status_code}",
+                status_code=resp.status_code,
+                body=resp.text[:500],
+            )
+        return resp.json()
+
+
+async def download_usage_markdown(
+    base_url: str,
+    access_token: str,
+    log_id: str,
+    dest: Path,
+    *,
+    timeout: float = CONVERT_TIMEOUT,
+) -> Path:
+    """GET /convert/download/{log_id}?proxy=true → markdown bytes at dest.
+
+    The endpoint has two modes (app/api/endpoints/convert.py
+    download_markdown_file): proxy=true streams the file bytes back on
+    this request (text/markdown), proxy=false returns a JSON envelope
+    with a presigned URL that would need a second download hop. The
+    proxy mode is chosen: one request, no redirect, and the presigned
+    URL buys nothing for a server-side client. 410 = the 3-hour
+    retention window expired; 404 = key missing/file already cleaned.
+    """
+    dest = Path(dest).expanduser().resolve()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as http:
+        resp = await http.get(
+            _url(base_url, f"/convert/download/{log_id}"),
+            headers=_auth_headers(access_token),
+            params={"proxy": "true"},
+        )
+        if resp.status_code >= 400:
+            raise PromptReadyAPIError(
+                f"download failed HTTP {resp.status_code}",
+                status_code=resp.status_code,
+                body=resp.text[:500],
+            )
+        dest.write_bytes(resp.content)
+    return dest

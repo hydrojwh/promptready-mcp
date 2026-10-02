@@ -1,7 +1,7 @@
 {
   "name": "promptready",
   "displayName": "PromptReady",
-  "version": "0.3.8",
+  "version": "0.4.0",
   "description": "Convert PDF/CSV to Markdown with AI-powered OCR via the PromptReady cloud API. Same account and credits as the web app.",
   "author": {
     "name": "PromptReady",
@@ -14,7 +14,7 @@
   "mcpServers": {
     "promptready": {
       "command": "uvx",
-      "args": ["promptready-mcp==0.3.8"]
+      "args": ["promptready-mcp==0.4.0"]
     }
   }
 }

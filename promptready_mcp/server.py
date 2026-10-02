@@ -3,6 +3,9 @@
 P0: get_credits
 P1: convert_pdf, get_status, wait_and_download
 P2 (0.3.7): slash prompts for humans — see prompts.py
+P3 (0.4.0): durable results — log_id-keyed status/download via the DB-backed
+    /users/usage + /convert/download/{log_id} endpoints, so a backend restart
+    or a second back-to-back convert can no longer orphan a finished job.
 """
 from __future__ import annotations
 
@@ -11,6 +14,8 @@ import json
 import logging
 import os
 import sys
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -38,6 +43,19 @@ DEFAULT_OUT_DIR = "promptready-out"
 # worst case, bounded so a wait call cannot hang. Status reads are GETs
 # and never deduct credits (credits go on POST /convert only).
 RESULT_URL_WAIT_SEC = 30.0
+
+# Durable path (0.4.0): /users/usage has no id filter, so finding a log_id
+# walks newest-first pages. 50 x 8 pages = the 400 most recent rows — well
+# past a heavy day of conversions; older than that gets a clear error
+# instead of an unbounded scan.
+USAGE_SCAN_PAGE_SIZE = 50
+USAGE_SCAN_MAX_ROWS = 400
+
+# usage_logs statuses (app/core/deps.py deduct/refund + queue_manager):
+# pending while queued/running; the rest are terminal.
+# "refunded" is a refund bookkeeping row: terminal, never downloadable. Treating it as
+# terminal keeps a directly-passed refund id from polling for the full timeout.
+USAGE_TERMINAL_STATUSES = ("completed", "failed", "cancelled", "refunded")
 
 # Match static/js/workspace-utils.js ENGINE_DISPLAY_NAMES + buildMarkdownDownloadFilename.
 # 별칭 집합은 백엔드 app/services/pdf_utils.py:normalize_engine 과 같아야 한다.
@@ -188,6 +206,305 @@ async def _with_auth_retry(coro_factory):
         _persist_refreshed_tokens(tokens)
         settings = load_settings()
         return await _call(settings.access_token), settings
+
+
+def _valid_log_id(raw: Any) -> Optional[str]:
+    """Canonical-UUID check for log_id before it goes into a request path.
+
+    Same defense posture as prompts._validate_arg (0.3.8): programmatic
+    callers can send anything, and a stray "/" in log_id would otherwise
+    become a path segment. Accepts only the dashed hex canonical form
+    (case-insensitive); everything else → None.
+    """
+    if not isinstance(raw, str):
+        return None
+    candidate = raw.strip()
+    if not candidate:
+        return None
+    try:
+        parsed = uuid.UUID(candidate)
+    except ValueError:
+        return None
+    if str(parsed) != candidate.lower():
+        return None
+    return str(parsed)
+
+
+def _parse_usage_time(value: Any) -> Optional[datetime]:
+    """Parse a usage-row timestamp (created_at/expires_at) → aware UTC."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _usage_row_downloadable(row: Dict[str, Any]) -> bool:
+    """completed ∧ result key present ∧ retention window not over."""
+    if row.get("status") != "completed" or not row.get("markdown_object_key"):
+        return False
+    expires = _parse_usage_time(row.get("expires_at"))
+    if expires is None:
+        # Key present but no parsable expiry — let the download attempt decide.
+        return True
+    return expires > datetime.now(timezone.utc)
+
+
+async def _find_usage_row(log_id: str) -> Dict[str, Any]:
+    """Find the /users/usage row with id == log_id (newest-first paging).
+
+    Raises PromptReadyAPIError when the row is not within the scan limit
+    — the error names the limit so the caller knows it is a bound, not
+    a "does not exist".
+    """
+    scanned = 0
+    while scanned < USAGE_SCAN_MAX_ROWS:
+        data, _ = await _with_auth_retry(
+            lambda base, token, _off=scanned: client.list_usage(
+                base, token, limit=USAGE_SCAN_PAGE_SIZE, offset=_off
+            )
+        )
+        for row in data.get("logs") or []:
+            if str(row.get("id")) == log_id:
+                return row
+        total = data.get("total_count") or 0
+        scanned += USAGE_SCAN_PAGE_SIZE
+        if scanned >= total:
+            break
+    raise PromptReadyAPIError(
+        f"log_id {log_id} not found within the {USAGE_SCAN_MAX_ROWS} most "
+        "recent usage rows — wrong id, another account, or an old conversion"
+    )
+
+
+def _is_conversion_row(row: Dict[str, Any]) -> bool:
+    """False for refund bookkeeping rows in /users/usage.
+
+    refund_credits without a log_id inserts a separate usage row
+    (status 'refunded', file_name 'REFUND: <reason>', 0 pages, negative
+    credits). It is not a conversion: picking it as "the latest" or listing it
+    next to real files is wrong, and it can never be downloaded.
+    """
+    if str(row.get("status") or "") == "refunded":
+        return False
+    return not str(row.get("file_name") or "").startswith("REFUND:")
+
+
+async def _latest_usage_row() -> Optional[Dict[str, Any]]:
+    """Most recent *conversion* row of /users/usage (the fallback pick), or None."""
+    data, _ = await _with_auth_retry(
+        lambda base, token: client.list_usage(base, token, limit=50, offset=0)
+    )
+    for row in data.get("logs") or []:
+        if _is_conversion_row(row):
+            return row
+    return None
+
+
+async def _wait_usage_row(
+    log_id: str, *, timeout_sec: int, poll_interval_sec: float
+) -> Dict[str, Any]:
+    """Poll the usage row for log_id until terminal status or timeout.
+
+    Returns the row; on timeout the row dict gets timeout=True plus a
+    message naming the log_id for the retry call.
+    """
+    deadline = asyncio.get_event_loop().time() + max(1, timeout_sec)
+    key_wait_started: Optional[float] = None
+    while True:
+        row = await _find_usage_row(log_id)
+        status = str(row.get("status") or "")
+        now = asyncio.get_event_loop().time()
+        if status == "completed" and not row.get("markdown_object_key"):
+            # The backend flips usage status to completed a few seconds BEFORE it
+            # records the result key (queue_manager: update_usage_log_status, then
+            # update_usage_log_markdown). Downloading in that gap 404s with "file
+            # key missing", which must never read as "expired — reconvert". Same
+            # window the memory path covers with RESULT_URL_WAIT_SEC (0.3.7).
+            if key_wait_started is None:
+                key_wait_started = now
+            if now - key_wait_started < RESULT_URL_WAIT_SEC and now < deadline:
+                await asyncio.sleep(max(0.5, min(poll_interval_sec, 2.0)))
+                continue
+        elif status in USAGE_TERMINAL_STATUSES:
+            return row
+        if status in USAGE_TERMINAL_STATUSES:
+            return row  # completed, key still missing after the wait: caller decides
+        if now >= deadline:
+            out = dict(row)
+            out["timeout"] = True
+            out["message"] = (
+                f"still '{status}' after {timeout_sec}s — call "
+                f"wait_and_download with log_id={log_id} to keep waiting"
+            )
+            return out
+        await asyncio.sleep(max(0.5, poll_interval_sec))
+
+
+async def _download_by_log_id(
+    row: Dict[str, Any], output_dir: str
+) -> Dict[str, Any]:
+    """Save the completed result of `row` via /convert/download/{log_id}.
+
+    Error mapping keeps the two contracts apart: 410/404 mean the stored
+    result is gone for good (re-convert is the only way out — say so);
+    anything else is a transient delivery failure where the conversion
+    succeeded and credits were spent, so the answer is a retry with the
+    same log_id, never a fresh convert.
+    """
+    log_id = str(row.get("id"))
+    out_dir = Path(output_dir).expanduser()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    name = row.get("file_name") or "document.pdf"
+    dest = out_dir / build_markdown_download_filename(name, row.get("engine_used"))
+    try:
+        await _with_auth_retry(
+            lambda base, token: client.download_usage_markdown(
+                base, token, log_id, dest
+            )
+        )
+        return {"ok": True, "markdown_path": str(dest.resolve())}
+    except PromptReadyAPIError as e:
+        if e.status_code == 410:
+            return {
+                "ok": False,
+                "expired": True,
+                "error": (
+                    "The result expired: downloads are kept for 3 hours "
+                    "(HTTP 410). The stored markdown is gone — converting "
+                    "the file again is the only way to get it, and that "
+                    "spends fresh credits."
+                ),
+            }
+        if e.status_code == 404 and not row.get("markdown_object_key"):
+            # The row never showed a result key: the result was never recorded (or
+            # not yet) — the conversion itself is complete and paid for. Retry,
+            # do not reconvert.
+            return {
+                "ok": False,
+                "expired": False,
+                "error": (
+                    "The conversion completed but its result key is not recorded "
+                    "yet (HTTP 404: file key missing)."
+                ),
+                "hint": (
+                    "The conversion succeeded and the credits were already spent — "
+                    "do NOT convert this file again. Retry wait_and_download with "
+                    f"log_id={log_id} in a few seconds; check list_conversions if it "
+                    "keeps failing."
+                ),
+            }
+        if e.status_code == 404:
+            return {
+                "ok": False,
+                "expired": True,
+                "error": (
+                    "The result file is no longer on the server (HTTP 404: "
+                    "missing or cleaned after the 3-hour window). Converting "
+                    "the file again is the only way to get it (fresh credits)."
+                ),
+            }
+        return {
+            "ok": False,
+            "expired": False,
+            "error": e.message,
+            "hint": (
+                "The conversion succeeded and the credits were already "
+                "spent — do NOT convert this file again. Retry "
+                f"wait_and_download with log_id={log_id}; the server still "
+                "holds the result."
+            ),
+        }
+
+
+def _usage_row_fields(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Common DB-row fields shared by the durable-path responses."""
+    return {
+        "log_id": str(row.get("id")) if row.get("id") is not None else None,
+        "file_name": row.get("file_name"),
+        "page_count": row.get("page_count"),
+        "credits_deducted": row.get("credits_deducted"),
+        "engine_used": row.get("engine_used"),
+        "created_at": row.get("created_at"),
+        "expires_at": row.get("expires_at"),
+    }
+
+
+async def _durable_wait_by_log_id(
+    log_id: str,
+    *,
+    timeout_sec: int,
+    poll_interval_sec: float,
+    output_dir: str,
+    source_path: str = "",
+    fallback: bool = False,
+) -> tuple:
+    """Wait for + download one conversion by log_id on the DB path.
+
+    Returns (ok, payload). payload carries source/log_id/file_name/...
+    plus stage + finished; ok=False payloads carry error (+hint for
+    transient delivery failures, +expired when the stored result is gone
+    for good). payload["row"] keeps the raw usage row for callers that
+    merge extra fields (convert_pdf wait path).
+    """
+    try:
+        row = await _wait_usage_row(
+            log_id, timeout_sec=timeout_sec, poll_interval_sec=poll_interval_sec
+        )
+    except PromptReadyAPIError as e:
+        return False, {
+            "error": e.message,
+            "status_code": e.status_code,
+            "body": e.body,
+            "log_id": log_id,
+        }
+    except httpx.HTTPError as e:
+        return False, {"error": f"Network error: {e}", "log_id": log_id}
+
+    payload: Dict[str, Any] = {"row": row}
+    if fallback:
+        payload["source"] = "usage_db_fallback"
+        payload["fallback_note"] = (
+            "session job not found on the server (restart or new instance?) "
+            "— resolved via the most recent conversion for this account"
+        )
+    else:
+        payload["source"] = "usage_db"
+    payload.update(_usage_row_fields(row))
+    status = str(row.get("status") or "")
+
+    if row.get("timeout"):
+        payload.update(
+            finished=False, stage=status, status=status,
+            timeout=True, message=row.get("message"),
+        )
+        return True, payload
+    if status != "completed":
+        payload.update(
+            finished=True, stage=status, status=status,
+            message=f"conversion ended as '{status}'",
+        )
+        return True, payload
+
+    saved = await _download_by_log_id(row, output_dir)
+    if not saved.get("ok"):
+        payload.update(
+            finished=False, stage="completed", status="completed",
+            error=saved["error"], expired=saved.get("expired", False),
+        )
+        if saved.get("hint"):
+            payload["hint"] = saved["hint"]
+        return False, payload
+    payload.update(
+        finished=True, stage="completed", status="completed",
+        markdown_path=saved.get("markdown_path"),
+        message="conversion completed; markdown saved",
+    )
+    return True, payload
 
 
 @mcp.tool()
@@ -381,6 +698,7 @@ async def convert_pdf(
         )
 
     job_id = (data.get("options") or {}).get("job_id")
+    log_id = (data.get("options") or {}).get("log_id")
     result: Dict[str, Any] = {
         "mode": "async",
         "filename": data.get("filename"),
@@ -391,12 +709,66 @@ async def convert_pdf(
         "message": data.get("message"),
         "credits_note": "Credits were deducted by the server on queue (same as web).",
     }
+    if log_id:
+        # Durable handle (0.4.0): the DB row id. Keep it — it finds the
+        # result even after a backend restart or another convert.
+        result["log_id"] = log_id
 
     if not wait:
-        result["next"] = "Call get_status or convert_pdf(..., wait=true)"
+        result["next"] = (
+            "Call get_status / convert_pdf(..., wait=true), or "
+            f"wait_and_download(log_id={log_id}) — the log_id works for 3 "
+            "hours even if the server restarts"
+            if log_id
+            else "Call get_status or convert_pdf(..., wait=true)"
+        )
         return _ok(**result)
 
-    # wait path
+    # wait path — durable route when the server handed us a log_id
+    if log_id:
+        outcome_ok, outcome = await _durable_wait_by_log_id(
+            log_id, timeout_sec=timeout_sec, poll_interval_sec=3.0,
+            output_dir=output_dir,
+        )
+        result["source"] = outcome.get("source")
+        row = outcome.get("row") or {}
+        if outcome_ok and outcome.get("stage") == "completed":
+            result["status"] = {"stage": "completed", "status": "completed"}
+            result["markdown_path"] = outcome.get("markdown_path")
+            result["download"] = "ok"
+        elif outcome_ok:
+            # failed / cancelled, or still pending at timeout — terminal-ish
+            result["status"] = {
+                "stage": outcome.get("stage"),
+                "status": outcome.get("stage"),
+                "message": outcome.get("message"),
+            }
+            result["download"] = "not_attempted" if outcome.get("finished") else "pending"
+            if outcome.get("timeout"):
+                result["next"] = outcome.get("message")
+        elif outcome.get("expired"):
+            result["status"] = {"stage": "completed", "status": "completed"}
+            result["download"] = "expired"
+            result["download_error"] = outcome.get("error")
+            result["next"] = outcome.get("error")
+        else:
+            result["status"] = {"stage": "completed", "status": "completed"}
+            result["download"] = "pending"
+            result["download_error"] = outcome.get("error")
+            result["next"] = outcome.get(
+                "hint"
+            ) or (
+                "Conversion succeeded and credits were already spent — do "
+                f"NOT convert this file again. Call wait_and_download with "
+                f"log_id={log_id} to fetch the markdown."
+            )
+        if row:
+            # Row fields from the DB (page_count, created_at, ...). Skipped
+            # on transport errors (empty row) so the upload-time log_id and
+            # counts survive in the response.
+            result.update(_usage_row_fields(row))
+        return _ok(**result)
+
     waited = await _poll_until_done(
         timeout_sec=timeout_sec, url_wait_sec=RESULT_URL_WAIT_SEC
     )
@@ -422,20 +794,119 @@ async def convert_pdf(
 
 
 @mcp.tool()
-async def get_status() -> str:
-    """Get conversion status for the authenticated user's current session job.
+async def get_status(log_id: str = "") -> str:
+    """Get conversion status — durable by log_id, session memory otherwise.
 
-    Uses GET /api/v1/convert/status (session = user_id when logged in).
+    With log_id (the UUID from convert_pdf's response): reads the
+    DB-backed usage row (GET /users/usage) — survives backend restarts,
+    redeploys and back-to-back converts. Status is the DB value
+    (pending / completed / failed / cancelled).
+
+    Without log_id: reads the session status (GET /convert/status); if
+    the server no longer knows the session job ("not_found" — restart,
+    scale-to-zero), falls back to the most recent usage row and says
+    which file it picked.
     """
+    if log_id:
+        norm = _valid_log_id(log_id)
+        if norm is None:
+            return _err(
+                f"invalid log_id {log_id!r}: expected a UUID "
+                "(the log_id field convert_pdf returned)"
+            )
+        try:
+            row = await _find_usage_row(norm)
+        except PromptReadyAPIError as e:
+            return _err(e.message, status_code=e.status_code, body=e.body)
+        except httpx.HTTPError as e:
+            return _err(f"Network error: {e}")
+        return _ok(
+            source="usage_db",
+            stage=row.get("status"),
+            status=row.get("status"),
+            **_usage_row_fields(row),
+        )
+
     try:
         data, _ = await _with_auth_retry(
             lambda base, token: client.get_conversion_status(base, token)
         )
-        return _ok(**data)
     except PromptReadyAPIError as e:
         return _err(e.message, status_code=e.status_code, body=e.body)
     except httpx.HTTPError as e:
         return _err(f"Network error: {e}")
+
+    stage = data.get("stage") or data.get("status")
+    if stage != "not_found":
+        return _ok(**data)
+
+    # Session memory lost the job — fall back to the newest usage row.
+    try:
+        row = await _latest_usage_row()
+    except PromptReadyAPIError as e:
+        return _err(e.message, status_code=e.status_code, body=e.body)
+    except httpx.HTTPError as e:
+        return _err(f"Network error: {e}")
+    if row is None:
+        return _ok(**data)  # nothing converted on this account either
+
+    return _ok(
+        source="usage_db_fallback",
+        stage=row.get("status"),
+        status=row.get("status"),
+        fallback_note=(
+            "session job not found on the server (restart or new instance?) "
+            "— showing the most recent conversion for this account"
+        ),
+        **_usage_row_fields(row),
+    )
+
+
+@mcp.tool()
+async def list_conversions(limit: int = 10) -> str:
+    """List this account's recent conversions (DB-backed, restart-proof).
+
+    Each entry: log_id, file_name, page_count, credits, status
+    (pending/completed/failed/cancelled), created_at, expires_at,
+    engine_used, and downloadable (completed ∧ result retained — false
+    once the 3-hour window passed). Use a log_id with wait_and_download
+    to fetch any downloadable result, even after a server restart.
+    """
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 200:
+        return _err(f"invalid limit {limit!r}: must be an integer in 1..200")
+    try:
+        data, _ = await _with_auth_retry(
+            # Over-fetch a little: refund bookkeeping rows are skipped below and
+            # would otherwise shrink the page below the requested limit.
+            lambda base, token: client.list_usage(
+                base, token, limit=min(limit + 10, 200), offset=0
+            )
+        )
+    except PromptReadyAPIError as e:
+        return _err(e.message, status_code=e.status_code, body=e.body)
+    except httpx.HTTPError as e:
+        return _err(f"Network error: {e}")
+
+    rows = [r for r in (data.get("logs") or []) if _is_conversion_row(r)][:limit]
+    conversions = [
+        {
+            "log_id": row.get("id"),
+            "file_name": row.get("file_name"),
+            "page_count": row.get("page_count"),
+            "credits": row.get("credits_deducted"),
+            "status": row.get("status"),
+            "created_at": row.get("created_at"),
+            "expires_at": row.get("expires_at"),
+            "engine_used": row.get("engine_used"),
+            "downloadable": _usage_row_downloadable(row),
+        }
+        for row in rows
+    ]
+    return _ok(
+        total_count=data.get("total_count"),
+        count=len(conversions),
+        conversions=conversions,
+    )
 
 
 @mcp.tool()
@@ -444,20 +915,48 @@ async def wait_and_download(
     poll_interval_sec: float = 3.0,
     output_dir: str = DEFAULT_OUT_DIR,
     source_path: str = "",
+    log_id: str = "",
 ) -> str:
-    """Poll get_status until completed/failed/cancelled, then download markdown if available.
+    """Wait for a conversion to finish, then save its markdown.
 
-    Like convert_pdf(wait=true), a "completed" stage whose payload has no
-    markdown_url yet is re-checked for up to RESULT_URL_WAIT_SEC (0.3.7):
-    the backend can flip the stage a few seconds before the result URL
-    appears. Status reads are free — only the upload spent credits.
+    Durable path (0.4.0): pass log_id (UUID from convert_pdf's response
+    or list_conversions) — status comes from the DB usage row and the
+    file from GET /convert/download/{log_id}, so the result survives
+    backend restarts and later converts. 410/404 there mean the 3-hour
+    retention window closed: the stored result is gone and converting
+    again (fresh credits) is the only way to get it.
+
+    Without log_id: polls the session status as before (free reads); if
+    the server reports not_found, falls back to the most recent usage
+    row and says which file was picked (plus a warning when it does not
+    match source_path).
 
     Args:
         timeout_sec: Max seconds to wait (OCR can take many minutes).
         poll_interval_sec: Sleep between polls (default 3).
         output_dir: Where to write the .md file.
-        source_path: Optional original file path (used only for output filename).
+        source_path: Optional original file path (fallback filename check).
+        log_id: Optional conversion id (UUID) — preferred, restart-proof.
     """
+    if log_id:
+        norm = _valid_log_id(log_id)
+        if norm is None:
+            return _err(
+                f"invalid log_id {log_id!r}: expected a UUID "
+                "(the log_id field convert_pdf returned)"
+            )
+        ok, payload = await _durable_wait_by_log_id(
+            norm,
+            timeout_sec=timeout_sec,
+            poll_interval_sec=poll_interval_sec,
+            output_dir=output_dir,
+        )
+        payload.pop("row", None)
+        if ok:
+            return _ok(**payload)
+        extra = {k: v for k, v in payload.items() if k != "error"}
+        return _err(payload.get("error") or "download failed", **extra)
+
     try:
         status = await _poll_until_done(
             timeout_sec=timeout_sec,
@@ -469,6 +968,13 @@ async def wait_and_download(
 
     stage = status.get("stage") or status.get("status")
     if stage != "completed":
+        if status.get("status") == "not_found" or stage == "not_found":
+            return await _fallback_wait_and_download(
+                timeout_sec=timeout_sec,
+                poll_interval_sec=poll_interval_sec,
+                output_dir=output_dir,
+                source_path=source_path,
+            )
         return _ok(
             finished=False,
             stage=stage,
@@ -487,6 +993,63 @@ async def wait_and_download(
         filename=status.get("filename"),
         message=status.get("message"),
     )
+
+
+async def _fallback_wait_and_download(
+    *,
+    timeout_sec: int,
+    poll_interval_sec: float,
+    output_dir: str,
+    source_path: str,
+) -> str:
+    """Session job not_found → newest usage row: wait on it, disclose the pick.
+
+    The pick is disclosed (file name, log_id, created_at) and a warning
+    is attached when its file name differs from source_path, so the
+    fallback never silently hands back a different document.
+    """
+    try:
+        picked = await _latest_usage_row()
+    except PromptReadyAPIError as e:
+        return _err(e.message, status_code=e.status_code, body=e.body)
+    except httpx.HTTPError as e:
+        return _err(f"Network error: {e}")
+    if picked is None:
+        return _err(
+            "no session job found and no usage history for this account — "
+            "convert a file first (convert_pdf)"
+        )
+
+    picked_log_id = str(picked.get("id"))
+    warnings: list = []
+    if (
+        source_path
+        and picked.get("file_name")
+        and Path(source_path).name != picked.get("file_name")
+    ):
+        warnings.append(
+            f"picked the most recent conversion {picked.get('file_name')!r} "
+            f"(log_id={picked_log_id}, created_at={picked.get('created_at')}), "
+            f"which does NOT match source_path {Path(source_path).name!r} — "
+            "pass log_id to target a specific conversion"
+        )
+
+    ok, payload = await _durable_wait_by_log_id(
+        picked_log_id,
+        timeout_sec=timeout_sec,
+        poll_interval_sec=poll_interval_sec,
+        output_dir=output_dir,
+        fallback=True,
+    )
+    payload.pop("row", None)
+    if warnings:
+        payload["warnings"] = warnings
+    if ok:
+        return _ok(**payload)
+    extra = {k: v for k, v in payload.items() if k != "error"}
+    if warnings:
+        extra.setdefault("warnings", warnings)
+    return _err(payload.get("error") or "download failed", **extra)
 
 
 def _status_has_markdown(status: Dict[str, Any]) -> bool:

@@ -16,7 +16,12 @@ agents (Grok, Claude Code, Cursor, and other MCP hosts).
 ## Features
 
 - Browser Google login (tokens stay on your machine)
-- `get_credits`, `convert_pdf`, `get_status`, `wait_and_download`
+- `get_credits`, `convert_pdf`, `get_status`, `wait_and_download`,
+  `list_conversions`
+- Durable results: `convert_pdf` returns a `log_id`; `wait_and_download`
+  / `get_status` accept it and resolve via the database, so a server
+  restart, a redeploy, or a second back-to-back convert can no longer
+  orphan a finished job (results are kept 3 hours)
 - Slash commands for humans: `/promptready:convert` and five more (below)
 - Saved convert defaults (engine, tables, images) — not on every call
 - Factory default: **PaddleOCR-VL**, tables on, images off
@@ -195,14 +200,32 @@ or point at the absolute path of the script:
 | `get_credits` | Credit balance |
 | `get_convert_settings` / `set_convert_settings` | Saved convert defaults |
 | `convert_pdf` | Upload path → queue (optional `wait`) |
-| `get_status` | Job status |
-| `wait_and_download` | Poll + save `.md` |
+| `get_status` | Status — by `log_id` (DB, restart-proof) or session |
+| `wait_and_download` | Wait + save `.md`, by `log_id` or session |
+| `list_conversions` | Recent conversions with `log_id`, status, downloadable |
 
 Downloaded names follow the web app: `{name}_PaddleOCR-VL.md` (engine label).
 
 Credits are deducted by the server when a job is queued, exactly as on the web
 app. `convert_pdf(wait=True)` can run for a long time, so give the host a high
 tool timeout.
+
+### Durable results with `log_id` (0.4.0)
+
+`convert_pdf` returns `log_id` — the id of the conversion record in your
+account. Unlike the session status, it survives backend restarts and later
+converts:
+
+```text
+convert_pdf(path="report.pdf")            → {"log_id": "…uuid…", …}
+wait_and_download(log_id="…uuid…")        → saves report_PaddleOCR-VL-1.6.md
+list_conversions(limit=10)                → past conversions + their log_ids
+```
+
+Results are downloadable for 3 hours after completion (HTTP 410 after that —
+converting again, with fresh credits, is then the only way). If a download
+fails for another reason, retry `wait_and_download` with the same `log_id`;
+never re-run `convert_pdf` for the same file.
 
 ## Slash commands
 

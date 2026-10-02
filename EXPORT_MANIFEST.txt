@@ -1,4 +1,4 @@
-export_utc=2026-09-28T190128Z
+export_utc=2026-10-02T050612Z
 source=PromptReady/mcp
 excluded=docs/history,.venv,*.egg-info,STATUS.md,OPEN_SOURCE_*,PUSH_LOG,PRE_PUSH,internal
 files:
